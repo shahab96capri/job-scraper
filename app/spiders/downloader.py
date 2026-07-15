@@ -112,6 +112,10 @@ class Downloader:
                 response = await page.goto(
                     url, wait_until="domcontentloaded", timeout=self._timeout_ms
                 )
+
+                await page.wait_for_load_state("networkidle")
+                await page.wait_for_timeout(5000)
+
             except PlaywrightTimeoutError as exc:
                 raise TransientCrawlError(f"Timeout navigating to {url}") from exc
             except PlaywrightError as exc:
@@ -135,6 +139,10 @@ class Downloader:
                 # the crawl strategy (headers, proxy, cadence).
                 raise PermanentCrawlError(f"{url} returned HTTP {status}")
 
-            return await page.content()
+            html=await page.content()
+
+            with open("debug_jobvision.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            return html
         finally:
             await page.close()
