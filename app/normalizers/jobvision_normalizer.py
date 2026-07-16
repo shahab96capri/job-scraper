@@ -241,7 +241,13 @@ class JobVisionNormalizer(BaseNormalizer):
             description=raw.raw_description,
             company_size=_map_company_size(raw.raw_company_size),
             founded_year=_jalali_year_to_gregorian(raw.raw_founded_year),
-            website=raw.raw_website,
+            website=(
+              None
+              if not raw.raw_website
+              else raw.raw_website
+              if raw.raw_website.startswith(("http://", "https://"))
+              else f"https://{raw.raw_website}"
+            ),
             phone=raw.raw_phone,
             email=raw.raw_email,
             address=raw.raw_address,
