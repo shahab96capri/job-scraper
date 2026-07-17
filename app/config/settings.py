@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     max_retries: int = Field(default=3, ge=0)
     retry_backoff_seconds: float = Field(default=5.0, ge=0.0)
     max_concurrent_spiders: int = Field(default=2, ge=1)
+    max_concurrent_requests: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "How many job/company detail pages the crawler is allowed to "
+            "fetch at the same time (separate browser tabs in the same "
+            "browser). Previously every page was fetched one at a time; "
+            "raising this is the main lever for crawl speed. Keep it "
+            "moderate (5-8) to avoid tripping the target site's rate "
+            "limiting / bot detection."
+        ),
+    )
 
     # --- Logging ---
     log_level: str = Field(default="INFO")

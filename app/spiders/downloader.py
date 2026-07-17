@@ -113,7 +113,26 @@ class Downloader:
                     url, wait_until="domcontentloaded", timeout=self._timeout_ms
                 )
 
-                await page.wait_for_timeout(5000)
+                # JobVision (and sites like it) render their real content
+                # client-side via Angular/JS *after* `domcontentloaded`
+                # fires, so we still need to give the page a moment before
+                # reading `page.content()`. The previous implementation did
+                # this with a flat `wait_for_timeout(5000)` — always paying
+                # the full 5 seconds on *every single page*, even ones that
+                # finished rendering in under a second. That was the single
+                # biggest cause of slow crawls.
+                #
+                # Instead, wait for network activity to actually settle
+                # (`networkidle`), capped at 3s so one stubborn page (e.g.
+                # a stray analytics/polling request that never truly goes
+                # idle) can't stall the whole crawl. If that cap is hit,
+                # fall back to a much shorter fixed wait (0.5s) as a safety
+                # net — cheap insurance against a genuinely slow render,
+                # without reintroducing the old always-pay-5s cost.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=3000)
+                except PlaywrightTimeoutError:
+                    await page.wait_for_timeout(500)
 
             except PlaywrightTimeoutError as exc:
                 raise TransientCrawlError(f"Timeout navigating to {url}") from exc
@@ -138,10 +157,6 @@ class Downloader:
                 # the crawl strategy (headers, proxy, cadence).
                 raise PermanentCrawlError(f"{url} returned HTTP {status}")
 
-            html=await page.content()
-
-            with open("debug_jobvision.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            return html
+            return await page.content()
         finally:
             await page.close()

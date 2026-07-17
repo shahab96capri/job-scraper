@@ -39,13 +39,17 @@ Design decisions:
 
 from __future__ import annotations
 
+import asyncio
 import traceback
 import uuid
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 
+from app.config.settings import get_settings
 from app.core.exceptions import PlatformError
 from app.core.logging import logger
 from app.dto.company_dto import CompanyDTO
+from app.dto.raw_dto import RawJobDTO
 from app.models.enums import ScrapeStatus
 from app.models.error import ErrorStageEnum
 from app.normalizers.base_normalizer import BaseNormalizer
@@ -95,12 +99,18 @@ class JobIngestionPipeline:
         normalizer: BaseNormalizer,
         job_validator: JobValidator | None = None,
         company_validator: CompanyValidator | None = None,
+        max_concurrent_requests: int | None = None,
     ) -> None:
         self.spider = spider
         self.parser = parser
         self.normalizer = normalizer
         self.job_validator = job_validator or JobValidator()
         self.company_validator = company_validator or CompanyValidator()
+        self.max_concurrent_requests = (
+            max_concurrent_requests
+            if max_concurrent_requests is not None
+            else get_settings().max_concurrent_requests
+        )
 
         self.source_repo = SourceRepository(session)
         self.location_repo = LocationRepository(session)
@@ -129,10 +139,62 @@ class JobIngestionPipeline:
         error_count = 0
 
         try:
-            async for job_url in self.spider.crawl_job_urls(known_ids):
-                jobs_found += 1
+            # Listing pages still have to be fetched one after another —
+            # each page's URL depends on knowing we haven't hit
+            # `max_pages`/the incremental-stop condition yet, so this part
+            # is inherently sequential. It's also cheap: a handful of pages
+            # vs. dozens of job/company detail pages, which is where almost
+            # all the crawl time actually goes.
+            job_urls = [url async for url in self.spider.crawl_job_urls(known_ids)]
+            jobs_found = len(job_urls)
+
+            # --- Phase 1: fetch every job detail page CONCURRENTLY -------
+            # Previously each job page was fetched one at a time, so total
+            # time scaled linearly with job count. Fetching several at once
+            # (bounded by `max_concurrent_requests` open browser tabs) is
+            # the single biggest lever for crawl speed.
+            job_html_by_url = await self._fetch_many(job_urls, self.spider.fetch_job_html)
+
+            # --- Phase 2: parse each fetched job page (pure CPU, no
+            # network) and collect the *unique* company URLs referenced. --
+            parsed_by_url: dict[str, RawJobDTO] = {}
+            for job_url, html_or_exc in job_html_by_url.items():
+                if isinstance(html_or_exc, Exception):
+                    error_count += 1
+                    await self._record_error(html_or_exc, source_id=source.id, url=job_url)
+                    continue
                 try:
-                    created, was_new_company = await self._process_job(job_url, source_id=source.id)
+                    parsed_by_url[job_url] = self.parser.parse_job_page(html_or_exc, source_url=job_url)
+                except Exception as exc:  # noqa: BLE001 - isolated per job, same as before
+                    error_count += 1
+                    await self._record_error(exc, source_id=source.id, url=job_url)
+
+            # --- Phase 3: fetch every *unique* company page CONCURRENTLY -
+            # Multiple jobs from the same employer used to trigger a full,
+            # separate re-download of that employer's company page for
+            # every single job — pure wasted work. Deduplicating by URL
+            # before fetching means each company page is downloaded once
+            # per crawl, no matter how many jobs link to it.
+            unique_company_urls = list(
+                {raw.raw_company_url for raw in parsed_by_url.values() if raw.raw_company_url}
+            )
+            company_html_by_url = await self._fetch_many(
+                unique_company_urls, self.spider.fetch_company_html
+            )
+
+            # --- Phase 4: normalize/validate/persist SEQUENTIALLY --------
+            # Everything from here on touches the shared database session,
+            # which (like the original code) must stay single-threaded —
+            # but it no longer waits on the network at all, since every
+            # page it needs was already downloaded in phases 1-3.
+            for job_url in job_urls:
+                raw_job = parsed_by_url.get(job_url)
+                if raw_job is None:
+                    continue  # already recorded as an error above
+                try:
+                    created, was_new_company = await self._process_parsed_job(
+                        job_url, raw_job, company_html_by_url, source_id=source.id
+                    )
                     if created:
                         jobs_created += 1
                     else:
@@ -177,13 +239,41 @@ class JobIngestionPipeline:
             return ScrapeStatus.PARTIAL_SUCCESS
         return ScrapeStatus.SUCCESS
 
-    async def _process_job(self, job_url: str, *, source_id: uuid.UUID) -> tuple[bool, bool | None]:
-        """Process one job URL end to end. Returns `(job_created,
-        company_created)` — `company_created` is `None` if no company
-        could be resolved at all."""
-        html = await self.spider.fetch_job_html(job_url)
-        raw_job = self.parser.parse_job_page(html, source_url=job_url)
+    async def _fetch_many(
+        self, urls: list[str], fetch_fn: Callable[[str], Awaitable[str]]
+    ) -> dict[str, str | Exception]:
+        """Fetch several URLs at once, capped at `self.max_concurrent_requests`
+        simultaneous requests. A failure on one URL is captured and returned
+        alongside the successes (never raised) so one bad page can never take
+        down the rest of the batch — the caller decides what to do with each
+        result, same error-isolation guarantee the old one-at-a-time loop had.
+        """
+        if not urls:
+            return {}
 
+        semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+
+        async def _bounded_fetch(url: str) -> tuple[str, str | Exception]:
+            async with semaphore:
+                try:
+                    return url, await fetch_fn(url)
+                except Exception as exc:  # noqa: BLE001 - classified by the caller
+                    return url, exc
+
+        results = await asyncio.gather(*(_bounded_fetch(url) for url in urls))
+        return dict(results)
+
+    async def _process_parsed_job(
+        self,
+        job_url: str,
+        raw_job: RawJobDTO,
+        company_html_by_url: dict[str, str | Exception],
+        *,
+        source_id: uuid.UUID,
+    ) -> tuple[bool, bool | None]:
+        """Persist one already-fetched-and-parsed job. Returns `(job_created,
+        company_created)` — `company_created` is `None` if no company could
+        be resolved at all."""
         if not raw_job.website_job_id:
             raw_job = raw_job.model_copy(
                 update={"website_job_id": self.spider.website_job_id_from_url(job_url)}
@@ -193,7 +283,7 @@ class JobIngestionPipeline:
         job_dto = self.job_validator.validate(job_dto)
 
         company_id, company_created = await self._resolve_company(
-            raw_job.raw_company_url, job_dto.company_name, source_id=source_id
+            raw_job.raw_company_url, job_dto.company_name, company_html_by_url, source_id=source_id
         )
 
         location = await self.location_repo.get_or_create(job_dto.province, job_dto.city)
@@ -226,27 +316,39 @@ class JobIngestionPipeline:
         return job_created, company_created
 
     async def _resolve_company(
-        self, raw_company_url: str | None, company_name: str | None, *, source_id: uuid.UUID
+        self,
+        raw_company_url: str | None,
+        company_name: str | None,
+        company_html_by_url: dict[str, str | Exception],
+        *,
+        source_id: uuid.UUID,
     ) -> tuple[uuid.UUID | None, bool | None]:
         if raw_company_url:
-            try:
-                html = await self.spider.fetch_company_html(raw_company_url)
-                raw_company = self.parser.parse_company_page(html, source_url=raw_company_url)
-                company_dto = self.normalizer.normalize_company(raw_company)
-                company_dto = self.company_validator.validate(company_dto)
-                location = await self.location_repo.get_or_create(
-                    company_dto.province, company_dto.city
-                )
-                company, created = await self.company_repo.upsert(
-                    company_dto, source_id=source_id, location_id=location.id if location else None
-                )
-                return company.id, created
-            except PlatformError as exc:
+            html_or_exc = company_html_by_url.get(raw_company_url)
+            if isinstance(html_or_exc, Exception):
                 self._logger.warning(
                     f"Company page crawl failed for {raw_company_url}, falling back to "
-                    f"name-only company record: {exc}"
+                    f"name-only company record: {html_or_exc}"
                 )
-                await self._record_error(exc, source_id=source_id, url=raw_company_url)
+                await self._record_error(html_or_exc, source_id=source_id, url=raw_company_url)
+            elif html_or_exc is not None:
+                try:
+                    raw_company = self.parser.parse_company_page(html_or_exc, source_url=raw_company_url)
+                    company_dto = self.normalizer.normalize_company(raw_company)
+                    company_dto = self.company_validator.validate(company_dto)
+                    location = await self.location_repo.get_or_create(
+                        company_dto.province, company_dto.city
+                    )
+                    company, created = await self.company_repo.upsert(
+                        company_dto, source_id=source_id, location_id=location.id if location else None
+                    )
+                    return company.id, created
+                except PlatformError as exc:
+                    self._logger.warning(
+                        f"Company page parsing failed for {raw_company_url}, falling back to "
+                        f"name-only company record: {exc}"
+                    )
+                    await self._record_error(exc, source_id=source_id, url=raw_company_url)
 
         if company_name:
             existing = await self.company_repo.get_by_source_and_name(source_id, company_name)

@@ -42,6 +42,12 @@ class _FakePage:
             raise self._outcome
         return _FakeResponse(self._outcome)
 
+    async def wait_for_load_state(self, state: str, timeout: int | None = None) -> None:
+        return None
+
+    async def wait_for_timeout(self, timeout: int) -> None:
+        return None
+
     async def content(self) -> str:
         return self._html
 
