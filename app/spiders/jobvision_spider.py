@@ -224,3 +224,19 @@ class JobVisionSpider(BaseSpider):
         company_urls = list(dict.fromkeys(company_urls))
 
         return CrawlPageResult(job_urls=job_urls, company_urls=company_urls)
+
+    def job_url_from_id(self, job_id: str) -> str:
+        """Best-effort job detail URL built from just an ID (no slug).
+
+        Needed for jobs discovered via a company's bonus job list (see
+        `JobVisionParser.parse_company_job_posts`), which only gives us an
+        ID — not the full `/jobs/{id}/{slug}` URL a listing page's `<a>`
+        tag has. Assumes JobVision's router keys off the numeric ID
+        segment only and treats the slug as decorative/SEO (same
+        convention as e.g. Stack Overflow's `/questions/{id}/{slug}`).
+        This is UNVERIFIED against the live site — the Pipeline treats a
+        failure to load this URL as expected/non-fatal for expired
+        postings and falls back to the summary data already in hand
+        rather than treating it as a real crawl error.
+        """
+        return f"{BASE_URL}/jobs/{job_id}"

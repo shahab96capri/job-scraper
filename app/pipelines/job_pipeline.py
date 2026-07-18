@@ -182,6 +182,76 @@ class JobIngestionPipeline:
                 unique_company_urls, self.spider.fetch_company_html
             )
 
+            # --- Phase 3.5: bonus jobs discovered via company pages ------
+            # The normal keyword/category search only ever returns ACTIVE
+            # postings. Every company page, though, already embeds that
+            # company's own job list — active AND expired, each flagged
+            # (`JobVisionParser.parse_company_job_posts`) — and we already
+            # downloaded that page in Phase 3, so reading it costs nothing
+            # extra. For each job discovered this way that Phase 1/2 didn't
+            # already cover, we *try* to fetch its own detail page for the
+            # full data (description, requirements, etc.) — but expired
+            # postings often don't render normally, so a failure here is
+            # expected and non-fatal: we keep the summary data (title,
+            # category, salary, dates, ...) already in hand instead of
+            # dropping the job entirely.
+            parse_company_jobs = getattr(self.parser, "parse_company_job_posts", None)
+            job_url_from_id = getattr(self.spider, "job_url_from_id", None)
+            if parse_company_jobs and job_url_from_id:
+                already_covered_ids = {
+                    raw.website_job_id for raw in parsed_by_url.values() if raw.website_job_id
+                }
+                bonus_by_job_id: dict[str, RawJobDTO] = {}
+                for company_url, html_or_exc in company_html_by_url.items():
+                    if isinstance(html_or_exc, Exception):
+                        continue
+                    try:
+                        for raw in parse_company_jobs(html_or_exc, source_url=company_url):
+                            if not raw.website_job_id or raw.website_job_id in already_covered_ids:
+                                continue
+                            bonus_by_job_id[raw.website_job_id] = raw
+                    except Exception as exc:  # noqa: BLE001 - a malformed bonus payload
+                        # shouldn't ever cost us the jobs we already have.
+                        self._logger.warning(f"Could not read bonus job list from {company_url}: {exc}")
+
+                if bonus_by_job_id:
+                    self._logger.info(
+                        f"Found {len(bonus_by_job_id)} additional job(s) via company pages "
+                        f"(includes expired postings not visible in normal search)"
+                    )
+                    candidate_url_by_job_id = {
+                        job_id: job_url_from_id(job_id) for job_id in bonus_by_job_id
+                    }
+                    bonus_html_by_url = await self._fetch_many(
+                        list(candidate_url_by_job_id.values()), self.spider.fetch_job_html
+                    )
+                    for job_id, summary_raw in bonus_by_job_id.items():
+                        candidate_url = candidate_url_by_job_id[job_id]
+                        html_or_exc = bonus_html_by_url.get(candidate_url)
+                        if isinstance(html_or_exc, Exception):
+                            self._logger.info(
+                                f"Bonus job {job_id}'s own page didn't load "
+                                f"(expected for expired postings) — keeping summary data."
+                            )
+                            parsed_by_url[candidate_url] = summary_raw.model_copy(
+                                update={"source_url": candidate_url}
+                            )
+                            continue
+                        try:
+                            parsed_by_url[candidate_url] = self.parser.parse_job_page(
+                                html_or_exc, source_url=candidate_url
+                            )
+                        except Exception:  # noqa: BLE001 - same graceful fallback
+                            self._logger.info(
+                                f"Bonus job {job_id}'s own page didn't parse "
+                                f"(expected for expired postings) — keeping summary data."
+                            )
+                            parsed_by_url[candidate_url] = summary_raw.model_copy(
+                                update={"source_url": candidate_url}
+                            )
+                    job_urls = job_urls + list(candidate_url_by_job_id.values())
+                    jobs_found = len(job_urls)
+
             # --- Phase 4: normalize/validate/persist SEQUENTIALLY --------
             # Everything from here on touches the shared database session,
             # which (like the original code) must stay single-threaded —

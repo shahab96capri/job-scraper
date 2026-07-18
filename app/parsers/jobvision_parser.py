@@ -171,3 +171,81 @@ class JobVisionParser(BaseParser):
             raw_twitter_url=None,
             raw_benefits=[b.get("titleFa") for b in benefits if b.get("titleFa")] or None,
         )
+
+    def parse_company_job_posts(self, html: str, *, source_url: str) -> list[RawJobDTO]:
+        """Bonus source of job data: every company page embeds its own
+        `JobPost/GetListOfCompanyJobPosts` payload — a flat list (capped at
+        10 by the API, most-recent-first) of that company's job posts,
+        **active and expired both**, each carrying an explicit
+        `expireTime.isExpired` flag. This is the only place expired
+        postings are discoverable at all, since the normal keyword/
+        category search only ever returns active ones.
+
+        Since we already download this exact page for company-profile
+        data, this costs zero extra requests.
+
+        Returned DTOs are intentionally partial: this summary payload
+        does not include description/requirements/technologies/
+        languages/education/military-status (those only exist on the
+        job's own detail page). The Pipeline treats these as a fallback
+        to use only if fetching the job's own detail page fails (common
+        for expired postings) — see `JobIngestionPipeline`.
+        """
+        state = _extract_ng_state(html, source_url=source_url)
+        matching_keys = [k for k in state if "JobPost/GetListOfCompanyJobPosts" in k]
+        if not matching_keys:
+            return []
+        jobs = state[matching_keys[0]] or []
+
+        results: list[RawJobDTO] = []
+        for job in jobs:
+            company = job.get("company") or {}
+            location = job.get("location") or {}
+            salary = job.get("salary")
+            job_categories = job.get("jobCategories") or []
+            benefits = job.get("benefits") or []
+            properties = job.get("properties") or {}
+            expire = job.get("expireTime") or {}
+            activation = job.get("activationTime") or {}
+
+            company_page_url = company.get("pageUrl")
+            raw_company_url = f"https://jobvision.ir{company_page_url}" if company_page_url else None
+
+            if job.get("id") is None:
+                continue  # can't build a stable identity without this
+
+            results.append(
+                RawJobDTO(
+                    source_code=self.SITE_CODE,
+                    website_job_id=str(job["id"]),
+                    source_url=source_url,  # placeholder — the Pipeline
+                    # overwrites this with the job's own detail-page URL
+                    # (or keeps this placeholder if that page never
+                    # loads) before persisting.
+                    raw_title=job.get("title"),
+                    raw_company_name=company.get("nameFa") or company.get("nameEn"),
+                    raw_company_url=raw_company_url,
+                    raw_category=_titled(job_categories[0]) if job_categories else None,
+                    raw_sub_category=None,
+                    raw_employment_type=_titled(job.get("workType")),
+                    raw_work_mode="دورکاری" if properties.get("isRemote") else "حضوری",
+                    raw_experience_level=_titled(job.get("seniorityLevel")),
+                    raw_education=None,  # not present in this summary payload
+                    raw_salary=_titled(salary) if salary else None,
+                    raw_province=_titled(location.get("province")),
+                    raw_city=_titled(location.get("city")),
+                    raw_gender=_titled(job.get("gender")),
+                    raw_military_status=None,  # not present in this summary payload
+                    raw_description=None,  # only on the job's own detail page
+                    raw_responsibilities=None,
+                    raw_requirements=None,
+                    raw_benefits=[b.get("titleFa") for b in benefits if b.get("titleFa")] or None,
+                    raw_technologies=None,  # only on the job's own detail page
+                    raw_skills=None,
+                    raw_languages=None,
+                    raw_published_at=activation.get("date"),
+                    raw_expires_at=expire.get("date"),
+                    raw_status="منقضی" if expire.get("isExpired") else "فعال",
+                )
+            )
+        return results

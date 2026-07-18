@@ -22,6 +22,14 @@ different code paths:
   (id 572) we do NOT have a fixture for — the fake downloader raises
   `TransientCrawlError` for it, exercising `_resolve_company`'s graceful
   fallback to a name-only `Company` row built from `raw_company_name`.
+
+It also exercises Phase 3.5's bonus-jobs-via-company-page path: fixture
+company 17161's page (`company_profile.html`) embeds its own 10-job
+`GetListOfCompanyJobPosts` list (job 1409285 plus 9 others, mostly
+expired). None of those 9 extra job IDs have their own detail-page
+fixture, so every one of them is expected to fall back to summary-only
+data — this is the normal/expected path for expired postings on the real
+site, not a failure.
 """
 
 from __future__ import annotations
@@ -112,8 +120,11 @@ async def test_jobvision_pipeline_end_to_end_then_export():
         )
         run = await pipeline.run()
 
-        assert run.jobs_found == 2
-        assert run.jobs_created == 2
+        # 2 jobs from the direct keyword-search crawl + 9 bonus jobs
+        # discovered via company 17161's own embedded job list (see module
+        # docstring) = 11 total.
+        assert run.jobs_found == 11
+        assert run.jobs_created == 11
         assert run.status == ScrapeStatus.SUCCESS  # company fallback doesn't count as a job error
 
         source_repo = SourceRepository(session)
@@ -125,6 +136,15 @@ async def test_jobvision_pipeline_end_to_end_then_export():
         job2 = await job_repo.get_by_source_and_website_id(source.id, "1434775")
         assert job1.title == "برنامه‌نویس - خانم"
         assert job2.title == "برنامه‌نویس فرانت‌اند (Front-end Developer)"
+
+        # A bonus job discovered only through company 17161's own job list,
+        # whose own detail page has no fixture — must have landed using
+        # the graceful summary-only fallback (title present, but no
+        # description since that field only exists on the real detail page).
+        bonus_job = await job_repo.get_by_source_and_website_id(source.id, "1130943")
+        assert bonus_job is not None
+        assert bonus_job.title == "کارشناس استقرار و پشتیبانی نرم افزار (ERP)"
+        assert bonus_job.description is None
 
         company_repo = CompanyRepository(session)
         company1 = await company_repo.get_by_source_and_website_id(source.id, "17161")
@@ -144,7 +164,9 @@ async def test_jobvision_pipeline_end_to_end_then_export():
         job_dtos = [JobExportDTO.from_orm_job(j) for j in jobs_orm]
         company_dtos = [CompanyExportDTO.from_orm_company(c) for c in companies_orm]
 
-        assert len(job_dtos) == 2
+        assert len(job_dtos) == 11
+        # All 11 jobs belong to just the 2 companies from the direct-crawl
+        # path — every bonus job is from company 17161, already resolved.
         assert len(company_dtos) == 2
         job1_export = next(d for d in job_dtos if d.website_job_id == "1409285")
         assert job1_export.company_name == "فرا سامانه//همکاران سیستم"
@@ -160,13 +182,13 @@ async def test_jobvision_pipeline_end_to_end_then_export():
     assert json_path.exists()
     json_text = json_path.read_text(encoding="utf-8")
     assert "برنامه‌نویس - خانم" in json_text
-    assert '"job_count": 2' in json_text
+    assert '"job_count": 11' in json_text
 
     assert excel_path.exists()
     workbook = openpyxl.load_workbook(excel_path)
     assert set(workbook.sheetnames) == {"Jobs", "Companies"}
     jobs_sheet = workbook["Jobs"]
-    # header row + 2 data rows
-    assert jobs_sheet.max_row == 3
+    # header row + 11 data rows
+    assert jobs_sheet.max_row == 12
     companies_sheet = workbook["Companies"]
     assert companies_sheet.max_row == 3
