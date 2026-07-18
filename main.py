@@ -4,6 +4,7 @@ into one runnable command.
 
     python main.py crawl --site jobvision
     python main.py crawl --site jobvision --pages 2 --keyword "برنامه نویس اندروید"
+    python main.py crawl --site jobvision --all-categories --pages 3
     python main.py sites
 
 Design decisions:
@@ -52,7 +53,7 @@ from app.pipelines.job_pipeline import JobIngestionPipeline
 from app.repositories import CompanyRepository, JobRepository, SourceRepository
 from app.spiders.base_spider import BaseSpider
 from app.spiders.downloader import Downloader
-from app.spiders.jobvision_spider import JobVisionSpider
+from app.spiders.jobvision_spider import ALL_CATEGORIES, JobVisionSpider
 
 app = typer.Typer(add_completion=False, help="Iran Job Intelligence Platform")
 
@@ -61,15 +62,15 @@ DEFAULT_MAX_PAGES = 5
 
 @dataclass(frozen=True)
 class SiteConfig:
-    spider_factory: Callable[[Downloader, int, str], BaseSpider]
+    spider_factory: Callable[[Downloader, int, list[str]], BaseSpider]
     parser_factory: Callable[[], object]
     normalizer_factory: Callable[[], object]
 
 
 SITE_REGISTRY: dict[str, SiteConfig] = {
     "jobvision": SiteConfig(
-        spider_factory=lambda downloader, max_pages, keyword: JobVisionSpider(
-            downloader, max_pages=max_pages, keyword=keyword
+        spider_factory=lambda downloader, max_pages, keywords: JobVisionSpider(
+            downloader, max_pages=max_pages, keywords=keywords
         ),
         parser_factory=JobVisionParser,
         normalizer_factory=JobVisionNormalizer,
@@ -89,8 +90,21 @@ def sites() -> None:
 @app.command()
 def crawl(
     site: str = typer.Option("jobvision", help="Site to crawl. See `python main.py sites`."),
-    pages: int = typer.Option(DEFAULT_MAX_PAGES, help="Max listing pages to crawl."),
-    keyword: str = typer.Option("برنامه نویس", help="Search keyword (JobVision only, for now)."),
+    pages: int = typer.Option(
+        DEFAULT_MAX_PAGES, help="Max listing pages to crawl PER category/keyword."
+    ),
+    keyword: str = typer.Option(
+        None, help="Search a single keyword (JobVision only). Ignored if --all-categories is set."
+    ),
+    all_categories: bool = typer.Option(
+        False,
+        "--all-categories",
+        help=(
+            f"Sweep every JobVision job category ({len(ALL_CATEGORIES)} categories) "
+            "instead of a single keyword. Much slower — this multiplies total "
+            "listing-page fetches by the number of categories."
+        ),
+    ),
 ) -> None:
     """Crawl one site end to end: pages -> jobs -> companies -> database
     -> JSON export -> Excel export."""
@@ -98,10 +112,17 @@ def crawl(
         typer.echo(f"Unknown site {site!r}. Known sites: {', '.join(SITE_REGISTRY)}", err=True)
         raise typer.Exit(code=1)
 
-    asyncio.run(_run_crawl(site, pages, keyword))
+    if all_categories:
+        keywords = ALL_CATEGORIES
+    elif keyword:
+        keywords = [keyword]
+    else:
+        keywords = ["برنامه نویس"]
+
+    asyncio.run(_run_crawl(site, pages, keywords))
 
 
-async def _run_crawl(site: str, pages: int, keyword: str) -> None:
+async def _run_crawl(site: str, pages: int, keywords: list[str]) -> None:
     configure_logging()
     settings = get_settings()
     config = SITE_REGISTRY[site]
@@ -123,7 +144,7 @@ async def _run_crawl(site: str, pages: int, keyword: str) -> None:
             max_retries=settings.max_retries,
             backoff_seconds=settings.retry_backoff_seconds,
         )
-        spider = config.spider_factory(downloader, pages, keyword)
+        spider = config.spider_factory(downloader, pages, keywords)
         parser = config.parser_factory()
         normalizer = config.normalizer_factory()
 

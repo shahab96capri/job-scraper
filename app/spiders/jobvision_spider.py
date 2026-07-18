@@ -27,6 +27,7 @@ specific sort order becomes important.
 
 from __future__ import annotations
 
+from typing import AsyncIterator
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
@@ -36,6 +37,107 @@ from app.spiders.base_spider import BaseSpider, CrawlPageResult
 BASE_URL = "https://jobvision.ir"
 JOB_CARD_SELECTOR = "a.desktop-job-card"
 COMPANY_LINK_SELECTOR = 'a[href^="/companies/"]'
+
+DEFAULT_KEYWORD = "برنامه نویس"
+
+# The full set of job categories as they appear in JobVision's own search
+# filter UI (copied verbatim by the user from the live site, 2026-07-18).
+# One category name's `titleFa` was independently cross-checked against a
+# real captured job page's `jobCategories` field
+# (`tests/fixtures/jobvision/job_detail_1.html`, category id 30 ==
+# "توسعه نرم افزار و برنامه نویسی") and matched exactly, confirming these
+# are the platform's real, current category labels rather than stale/
+# guessed ones.
+#
+# We deliberately crawl these via the *keyword* search endpoint (already
+# verified working — see this module's docstring) rather than guessing at
+# `/jobs/category/{slug}` URLs: a handful of category slugs were found via
+# web search (`developer`, `civil`, `content`, `insurance`, `sales`,
+# `labourer`), but nothing confirms those slugs map 1:1 onto this ID-based
+# category list, and getting that mapping wrong would silently under-crawl
+# entire categories. Full-text keyword search against each category's own
+# display name is a safe, already-proven mechanism, at the cost of being a
+# best-effort sweep rather than a guaranteed-exact category filter for
+# every edge case.
+ALL_CATEGORIES: list[str] = [
+    "فروش و بازاریابی - سطوح کارشناسی و مدیریتی",
+    "فروش و بازاریابی - فروشنده / بازاریاب و ویزیتور / صندوقدار",
+    "مدیر فروشگاه / مدیر رستوران",
+    "خدمات و پشتیبانی مشتریان",
+    "نماینده علمی / مدرپ",
+    "مدیریت بیمه",
+    "دیجیتال مارکتینگ و سئو",
+    "ترجمه / تولید محتوا / نویسندگی و ویراستاری",
+    "توسعه نرم افزار و برنامه نویسی",
+    "تست نرم افزار",
+    "شبکه / DevOps / پشتیبانی سخت افزاری و نرم افزاری",
+    "علوم داده / هوش مصنوعی",
+    "طراحی بازی",
+    "طراحی گرافیک / طراحی انیمیشن و موشن گرافیک",
+    "طراحی لباس / طراحی طلا و جواهر",
+    "طراحی صنعتی / نقشه کشی صنعتی",
+    "عکاسی",
+    "مشاغل حوزه فیلم و سینما",
+    "طراحی موسیقی و صدا",
+    "طراحی رابط و تجربه کاربری (UI/UX)",
+    "مدیر محصول / مالک محصول",
+    "تحلیل و توسعه کسب و کار / استراتژی / برنامه ریزی",
+    "مهندسی صنایع / مدیریت تولید / مدیریت پروژه / مدیریت عملیات",
+    "خرید / تدارکات",
+    "بازرگانی / تجارت",
+    "لجستیک / حمل و نقل / انبارداری",
+    "راننده / مسئول توزیع / پیک موتوری",
+    "مالی و حسابداری",
+    "معامله گر و تحلیل گر بازارهای مالی",
+    "تحصیل دار / کارپرداز",
+    "مسئول دفتر / کارمند اداری و ثبت اطلاعات / تایپیست",
+    "منابع انسانی",
+    "مدیر اجرایی / مدیر داخلی",
+    "مدیرعامل / مدیر کارخانه",
+    "مهندسی برق",
+    "مهندسی پزشکی",
+    "مهندسی مکانیک / مهندسی هوا و فضا",
+    "مهندسی صنایع غذایی",
+    "مهندسی شیمی / مهندسی نفت و گاز",
+    "مهندسی انرژی / مهندسی هسته ای",
+    "بهداشت، ایمنی و محیط زیست (HSE)",
+    "مهندسی عمران",
+    "مهندسی معماری و شهرسازی",
+    "مهندسی معدن / زمین شناسی",
+    "مهندسی مواد و متالورژی",
+    "مهندسی نساجی",
+    "مهندسی پلیمر",
+    "مهندسی کشاورزی / علوم دامی",
+    "زیست شناسی / علوم زیستی / علوم آزمایشگاهی",
+    "داروسازی / بیوشیمی / شیمی",
+    "پزشک / دندانپزشک / دامپزشک",
+    "پرستار و بهیار / تکنسین حوزه سلامت و درمان / دستیار پزشک",
+    "پرستار سالمند / پرستار کودک",
+    "روانشناسی / مشاوره / علوم اجتماعی",
+    "حقوقی",
+    "روابط عمومی",
+    "خبرنگار / روزنامه نگار",
+    "آموزش / تدریس",
+    "پژوهش",
+    "نگهبان",
+    "کارگر ساده / نیروی خدماتی",
+    "تکنسین فنی / تعمیرکار / کارگر ماهر",
+    "تخصص های ساختمانی (بنّا / گچ کار / کاشی کار و ...)",
+    "نجار / MDF کار / کابینت کار / مبل ساز / رنگ کار چوب",
+    "آرایشگر",
+    "قناد و شیرینی پز",
+    "بافنده فرش (قالی باف)",
+    "نانوا",
+    "قفل و کلیدساز",
+    "قصاب",
+    "کفاش",
+    "خیاط",
+    "آشپز",
+    "باریستا / کافی من / گارسون",
+    "راهنمای تور / مهماندار",
+    "ورزش / تربیت بدنی / تغذیه",
+    "تاریخ / جغرافیا / باستان شناسی",
+]
 
 
 def _strip_query(url: str) -> str:
@@ -51,9 +153,26 @@ class JobVisionSpider(BaseSpider):
     SITE_NAME = "JobVision"
     BASE_URL = BASE_URL
 
-    def __init__(self, downloader, *, max_pages: int, keyword: str = "برنامه نویس") -> None:
+    def __init__(
+        self,
+        downloader,
+        *,
+        max_pages: int,
+        keyword: str | None = None,
+        keywords: list[str] | None = None,
+    ) -> None:
         super().__init__(downloader, max_pages=max_pages)
-        self.keyword = keyword
+        if keywords:
+            self.keywords = list(keywords)
+        elif keyword:
+            self.keywords = [keyword]
+        else:
+            self.keywords = [DEFAULT_KEYWORD]
+        # `build_listing_url` reads this single attribute — `crawl_job_urls`
+        # below rotates it through `self.keywords` one at a time so the
+        # inherited pagination/incremental-stop logic in `BaseSpider`
+        # doesn't need to know anything changed.
+        self.keyword = self.keywords[0]
 
     def build_listing_url(self, page: int) -> str:
         # VERIFIED (2026-07-14): confirmed by direct browser navigation —
@@ -61,6 +180,26 @@ class JobVisionSpider(BaseSpider):
         # job listings. `keyword` matches the sample fixture's own
         # canonical URL structure (`/jobs/keyword/{keyword}`).
         return f"{BASE_URL}/jobs/keyword/{self.keyword}?page={page}"
+
+    async def crawl_job_urls(
+        self, known_website_job_ids: set[str] | None = None
+    ) -> AsyncIterator[str]:
+        """Like `BaseSpider.crawl_job_urls`, but sweeps every entry in
+        `self.keywords` (one search per category) instead of just one,
+        de-duplicating job URLs seen under more than one category within
+        this same run (a job can legitimately show up under multiple
+        category searches). Each category still respects `max_pages` and
+        the incremental-stop rule independently."""
+        seen_this_run: set[str] = set()
+        for kw in self.keywords:
+            self.keyword = kw
+            self._logger.info(f"Crawling category/keyword: {kw!r}")
+            async for job_url in super().crawl_job_urls(known_website_job_ids):
+                website_job_id = self.website_job_id_from_url(job_url)
+                if website_job_id in seen_this_run:
+                    continue
+                seen_this_run.add(website_job_id)
+                yield job_url
 
     def extract_page_urls(self, listing_html: str) -> CrawlPageResult:
         soup = BeautifulSoup(listing_html, "html.parser")
