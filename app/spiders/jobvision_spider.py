@@ -27,11 +27,13 @@ specific sort order becomes important.
 
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncIterator
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import quote, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
+from app.config.settings import get_settings
 from app.spiders.base_spider import BaseSpider, CrawlPageResult
 
 BASE_URL = "https://jobvision.ir"
@@ -179,7 +181,15 @@ class JobVisionSpider(BaseSpider):
         # `?page=1` vs `?page=2` on this exact URL shape returns different
         # job listings. `keyword` matches the sample fixture's own
         # canonical URL structure (`/jobs/keyword/{keyword}`).
-        return f"{BASE_URL}/jobs/keyword/{self.keyword}?page={page}"
+        #
+        # `safe=""` matters: several real category names contain a literal
+        # "/" (e.g. "فروش و بازاریابی - فروشنده / بازاریاب و ویزیتور /
+        # صندوقدار"). quote()'s default `safe='/'` would leave that slash
+        # unescaped, splitting it into extra URL path segments and
+        # breaking the route entirely — it must be encoded as %2F instead,
+        # same as every other character in the keyword.
+        encoded_keyword = quote(self.keyword, safe="")
+        return f"{BASE_URL}/jobs/keyword/{encoded_keyword}?page={page}"
 
     async def crawl_job_urls(
         self, known_website_job_ids: set[str] | None = None
@@ -189,17 +199,44 @@ class JobVisionSpider(BaseSpider):
         de-duplicating job URLs seen under more than one category within
         this same run (a job can legitimately show up under multiple
         category searches). Each category still respects `max_pages` and
-        the incremental-stop rule independently."""
+        the incremental-stop rule independently.
+
+        A listing-page failure for ONE category (network blip, site
+        temporarily blocking that specific request, etc.) is logged and
+        skipped rather than aborting the whole sweep — with 77 categories
+        in one run, letting a single bad one take down all the others
+        would be far worse than just missing that one category this time
+        around. (`BaseSpider.crawl_job_urls` on its own — single-category
+        use — still lets failures propagate, which is correct there:
+        with nothing else to fall back to, the caller needs to know.)
+        """
         seen_this_run: set[str] = set()
-        for kw in self.keywords:
+        for i, kw in enumerate(self.keywords):
             self.keyword = kw
             self._logger.info(f"Crawling category/keyword: {kw!r}")
-            async for job_url in super().crawl_job_urls(known_website_job_ids):
-                website_job_id = self.website_job_id_from_url(job_url)
-                if website_job_id in seen_this_run:
-                    continue
-                seen_this_run.add(website_job_id)
-                yield job_url
+            try:
+                async for job_url in super().crawl_job_urls(known_website_job_ids):
+                    website_job_id = self.website_job_id_from_url(job_url)
+                    if website_job_id in seen_this_run:
+                        continue
+                    seen_this_run.add(website_job_id)
+                    yield job_url
+            except Exception as exc:  # noqa: BLE001 - isolate per category, same
+                # principle as the pipeline isolating failures per job.
+                self._logger.warning(
+                    f"Category {kw!r} failed and will be skipped "
+                    f"(continuing with the remaining categories): {exc}"
+                )
+
+            # A short, polite pause between categories — not needed for
+            # THIS run's failure (it happened on the very first request,
+            # before we'd sent enough traffic to plausibly trigger rate
+            # limiting), but sweeping 77 categories back-to-back with zero
+            # pause is exactly the kind of pattern that gets an IP
+            # temporarily blocked, so it's cheap insurance for the rest
+            # of a long run.
+            if i < len(self.keywords) - 1:
+                await asyncio.sleep(get_settings().request_delay_seconds)
 
     def extract_page_urls(self, listing_html: str) -> CrawlPageResult:
         soup = BeautifulSoup(listing_html, "html.parser")

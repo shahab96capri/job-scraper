@@ -139,11 +139,23 @@ class TestJobVisionSpiderListingExtraction:
         spider = JobVisionSpider(downloader=None, max_pages=1, keyword="برنامه نویس اندروید")
 
         assert spider.build_listing_url(1) == (
-            "https://jobvision.ir/jobs/keyword/برنامه نویس اندروید?page=1"
+            "https://jobvision.ir/jobs/keyword/"
+            "%D8%A8%D8%B1%D9%86%D8%A7%D9%85%D9%87%20%D9%86%D9%88%DB%8C%D8%B3"
+            "%20%D8%A7%D9%86%D8%AF%D8%B1%D9%88%DB%8C%D8%AF?page=1"
         )
-        assert spider.build_listing_url(2) == (
-            "https://jobvision.ir/jobs/keyword/برنامه نویس اندروید?page=2"
-        )
+        assert spider.build_listing_url(2).endswith("?page=2")
+
+    def test_build_listing_url_encodes_slash_in_category_name(self):
+        # Several real category names contain a literal "/" (e.g. "خرید /
+        # تدارکات"). Interpolating that raw into a URL path segment would
+        # silently split it into extra path segments and break the route
+        # (2026-07-18 production failure this test guards against) --
+        # it must come out as %2F, not a literal slash.
+        spider = JobVisionSpider(downloader=None, max_pages=1, keyword="خرید / تدارکات")
+
+        url = spider.build_listing_url(1)
+        assert "%2F" in url
+        assert "/تدارکات" not in url  # would indicate an unencoded literal slash
 
     def test_extracts_30_job_urls_from_real_listing_page(self):
         html = _read_fixture("listing_page.html")

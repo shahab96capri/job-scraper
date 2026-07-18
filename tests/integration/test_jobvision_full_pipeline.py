@@ -106,7 +106,8 @@ async def test_jobvision_pipeline_end_to_end_then_export():
     site_code = f"jobvision_test_{uuid.uuid4().hex[:8]}"
 
     keyword = "برنامه نویس"
-    listing_url = f"https://jobvision.ir/jobs/keyword/{keyword}?page=1"
+    spider_for_url = JobVisionSpider(downloader=None, max_pages=1, keyword=keyword)
+    listing_url = spider_for_url.build_listing_url(1)
     downloader = _FixtureDownloader(listing_url)
     spider = JobVisionSpider(downloader, max_pages=1, keyword=keyword)
     spider.SITE_CODE = site_code
