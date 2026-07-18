@@ -270,11 +270,14 @@ Write-Host "SETUP COMPLETED"
 Write-Host "================================="
 
 
-Write-Host ""
-Write-Host "Activate environment:"
-Write-Host ".\.venv\Scripts\Activate.ps1"
+# Pre-unblock run.ps1 so the user doesn't hit the "not digitally signed"
+# error on it the way they did on this script.
+$runScript = Join-Path $PROJECT_ROOT "run.ps1"
+if (Test-Path $runScript) {
+    Unblock-File -Path $runScript -ErrorAction SilentlyContinue
+}
 
 
 Write-Host ""
-Write-Host "Run:"
-Write-Host "python main.py crawl --pages 1"
+Write-Host "Run (no activation needed):"
+Write-Host ".\run.ps1 crawl --pages 1"
