@@ -101,12 +101,14 @@ class JobIngestionPipeline:
         job_validator: JobValidator | None = None,
         company_validator: CompanyValidator | None = None,
         max_concurrent_requests: int | None = None,
+        discover_expired_via_companies: bool = False,
     ) -> None:
         self.spider = spider
         self.parser = parser
         self.normalizer = normalizer
         self.job_validator = job_validator or JobValidator()
         self.company_validator = company_validator or CompanyValidator()
+        self.discover_expired_via_companies = discover_expired_via_companies
         self.max_concurrent_requests = (
             max_concurrent_requests
             if max_concurrent_requests is not None
@@ -184,21 +186,22 @@ class JobIngestionPipeline:
             )
 
             # --- Phase 3.5: bonus jobs discovered via company pages ------
-            # The normal keyword/category search only ever returns ACTIVE
-            # postings. Every company page, though, already embeds that
-            # company's own job list — active AND expired, each flagged
-            # (`JobVisionParser.parse_company_job_posts`) — and we already
-            # downloaded that page in Phase 3, so reading it costs nothing
-            # extra. For each job discovered this way that Phase 1/2 didn't
-            # already cover, we *try* to fetch its own detail page for the
-            # full data (description, requirements, etc.) — but expired
-            # postings often don't render normally, so a failure here is
-            # expected and non-fatal: we keep the summary data (title,
-            # category, salary, dates, ...) already in hand instead of
-            # dropping the job entirely.
+            # OFF by default (see discover_expired_via_companies /
+            # --include-expired). The normal keyword/category search only
+            # ever returns ACTIVE postings. Every company page, though,
+            # already embeds that company's own job list — active AND
+            # expired, each flagged (`JobVisionParser.parse_company_job_posts`)
+            # — and we already downloaded that page in Phase 3, so reading
+            # it costs nothing extra BY ITSELF. But real-world testing with
+            # --all-categories surfaced 12,983 bonus jobs in one run — even
+            # after skipping the individual-page fetch for ones already
+            # known expired, that still left 7,299 active ones needing a
+            # real fetch, which is what actually makes this slow. Worth it
+            # when the user specifically wants expired-postings history;
+            # not worth it as an always-on default.
             parse_company_jobs = getattr(self.parser, "parse_company_job_posts", None)
             job_url_from_id = getattr(self.spider, "job_url_from_id", None)
-            if parse_company_jobs and job_url_from_id:
+            if self.discover_expired_via_companies and parse_company_jobs and job_url_from_id:
                 already_covered_ids = {
                     raw.website_job_id for raw in parsed_by_url.values() if raw.website_job_id
                 }

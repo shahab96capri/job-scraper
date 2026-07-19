@@ -117,6 +117,18 @@ def crawl(
             "more simultaneous requests to the target site, so raise gradually."
         ),
     ),
+    include_expired: bool = typer.Option(
+        False,
+        "--include-expired",
+        help=(
+            "Also discover expired job postings via each company's own job "
+            "list (not just active ones from the normal search). OFF by "
+            "default: real-world testing with --all-categories found this "
+            "alone can surface 10,000+ extra jobs to check, turning a "
+            "several-minute run into one that takes hours. Turn on when "
+            "you specifically want that historical data."
+        ),
+    ),
 ) -> None:
     """Crawl one site end to end: pages -> jobs -> companies -> database
     -> JSON export -> Excel export."""
@@ -131,11 +143,11 @@ def crawl(
     else:
         keywords = ["برنامه نویس"]
 
-    asyncio.run(_run_crawl(site, pages, keywords, concurrency))
+    asyncio.run(_run_crawl(site, pages, keywords, concurrency, include_expired))
 
 
 async def _run_crawl(
-    site: str, pages: int, keywords: list[str], concurrency: int | None
+    site: str, pages: int, keywords: list[str], concurrency: int | None, include_expired: bool
 ) -> None:
     configure_logging()
     settings = get_settings()
@@ -169,6 +181,7 @@ async def _run_crawl(
                 parser=parser,
                 normalizer=normalizer,
                 max_concurrent_requests=concurrency,
+                discover_expired_via_companies=include_expired,
             )
             run = await pipeline.run()
 

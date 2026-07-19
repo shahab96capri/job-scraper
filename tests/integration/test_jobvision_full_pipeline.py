@@ -118,6 +118,7 @@ async def test_jobvision_pipeline_end_to_end_then_export():
             spider=spider,
             parser=JobVisionParser(),
             normalizer=JobVisionNormalizer(),
+            discover_expired_via_companies=True,
         )
         run = await pipeline.run()
 
@@ -193,3 +194,43 @@ async def test_jobvision_pipeline_end_to_end_then_export():
     assert jobs_sheet.max_row == 12
     companies_sheet = workbook["Companies"]
     assert companies_sheet.max_row == 3
+
+
+async def test_bonus_company_jobs_are_not_discovered_unless_opted_in():
+    # Regression test for the fix that made discover_expired_via_companies
+    # opt-in: a real --all-categories run surfaced 12,983 bonus jobs (7,299
+    # of them still needing an individual fetch attempt) when this was
+    # always on, turning a several-minute run into one that took hours.
+    # Locks in that the DEFAULT pipeline construction — no
+    # discover_expired_via_companies argument at all, same as every
+    # ordinary crawl — does not touch company 17161's bonus job list, even
+    # though the fixture downloader would happily serve it if asked.
+    site_code = f"jobvision_test_{uuid.uuid4().hex[:8]}"
+
+    keyword = "برنامه نویس"
+    spider_for_url = JobVisionSpider(downloader=None, max_pages=1, keyword=keyword)
+    listing_url = spider_for_url.build_listing_url(1)
+    downloader = _FixtureDownloader(listing_url)
+    spider = JobVisionSpider(downloader, max_pages=1, keyword=keyword)
+    spider.SITE_CODE = site_code
+
+    async with get_db_session() as session:
+        pipeline = JobIngestionPipeline(
+            session,
+            spider=spider,
+            parser=JobVisionParser(),
+            normalizer=JobVisionNormalizer(),
+            # discover_expired_via_companies intentionally omitted -> False
+        )
+        run = await pipeline.run()
+
+        # Just the 2 directly-crawled jobs -- none of company 17161's
+        # other 9 bonus jobs.
+        assert run.jobs_found == 2
+        assert run.jobs_created == 2
+
+        source_repo = SourceRepository(session)
+        source = await source_repo.get_by_code(site_code)
+        job_repo = JobRepository(session)
+        bonus_job = await job_repo.get_by_source_and_website_id(source.id, "1130943")
+        assert bonus_job is None
