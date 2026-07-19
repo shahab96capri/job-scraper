@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+from decimal import Decimal
 
 from app.core.logging import logger
 from app.dto.company_dto import CompanyDTO
@@ -140,15 +141,22 @@ def _map_gender(raw: str | None) -> Gender:
     return Gender.UNKNOWN
 
 
-def _parse_salary(raw_salary: str | None) -> tuple[float | None, float | None]:
+def _parse_salary(raw_salary: str | None) -> tuple[Decimal | None, Decimal | None]:
     """Parse JobVision's `salary.titleFa` text (already Toman, in
     millions) into `(min, max)` actual-Toman values. Returns `(None,
     None)` for negotiable/missing salary — VERIFIED against
-    "45 - 60 میلیون تومان" (range) and `None` (negotiable, job 2)."""
+    "45 - 60 میلیون تومان" (range) and `None` (negotiable, job 2).
+
+    Uses `Decimal` (parsed directly from the matched digit-string, never
+    via `float`) since these are money values — `JobDTO.salary_min`/
+    `salary_max` are `Decimal` fields, and going through `float` first
+    is exactly the kind of thing that eventually produces an ugly
+    45000000.00000001 for someone's paycheck.
+    """
     if not raw_salary:
         return None, None
     normalized = _normalize_digits(raw_salary)
-    numbers = [float(n) for n in _SALARY_NUMBER_RE.findall(normalized)]
+    numbers = [Decimal(n) for n in _SALARY_NUMBER_RE.findall(normalized)]
     if not numbers:
         return None, None
     if len(numbers) == 1:

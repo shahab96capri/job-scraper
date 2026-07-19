@@ -95,7 +95,7 @@ async def new_context(**overrides: object) -> BrowserContext:
         extra_http_headers={"Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7"},
     )
     context_kwargs.update(overrides)
-    return await browser.new_context(**context_kwargs)
+    return await browser.new_context(**context_kwargs)  # type: ignore[arg-type]
 
 
 async def dispose_browser() -> None:

@@ -10,7 +10,6 @@ Spider/Parser/Normalizer implementation, never a migration.
 
 from __future__ import annotations
 
-import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, String

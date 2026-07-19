@@ -36,7 +36,6 @@ from tenacity import (
     RetryError,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_exponential,
 )
 
 from app.core.exceptions import PermanentCrawlError, RateLimitedError, TransientCrawlError
@@ -80,12 +79,22 @@ class Downloader:
         the `RateLimitedError` subclass) after exhausting
         `max_retries` retries with exponential backoff.
         """
+        def _wait_seconds(retry_state) -> float:
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            # A 429 means the site is explicitly telling us to slow down —
+            # hammering it again after the same short backoff a plain
+            # network blip gets is exactly how a crawler gets an IP
+            # blocked outright. Wait noticeably longer (4x base, higher
+            # ceiling) specifically for that case.
+            is_rate_limited = isinstance(exc, RateLimitedError)
+            multiplier = self._backoff_seconds * (4 if is_rate_limited else 1)
+            wait = multiplier * (2 ** (retry_state.attempt_number - 1))
+            return min(wait, 120 if is_rate_limited else 60)
+
         retrying = AsyncRetrying(
             retry=retry_if_exception_type(TransientCrawlError),
             stop=stop_after_attempt(self._max_retries + 1),
-            wait=wait_exponential(
-                multiplier=self._backoff_seconds, min=self._backoff_seconds, max=60
-            ),
+            wait=_wait_seconds,
             reraise=True,
         )
         try:

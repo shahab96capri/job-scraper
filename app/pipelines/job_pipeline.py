@@ -52,6 +52,7 @@ from app.dto.company_dto import CompanyDTO
 from app.dto.raw_dto import RawJobDTO
 from app.models.enums import ScrapeStatus
 from app.models.error import ErrorStageEnum
+from app.models.scrape_history import ScrapeHistory
 from app.normalizers.base_normalizer import BaseNormalizer
 from app.parsers.base_parser import BaseParser
 from app.repositories import (
@@ -124,7 +125,7 @@ class JobIngestionPipeline:
 
         self._logger = logger.bind(component=f"pipelines.job_ingestion.{spider.SITE_CODE}")
 
-    async def run(self):
+    async def run(self) -> ScrapeHistory:
         source = await self.source_repo.get_or_create(
             code=self.spider.SITE_CODE, name=self.spider.SITE_NAME, base_url=self.spider.BASE_URL
         )
@@ -227,8 +228,8 @@ class JobIngestionPipeline:
                     )
                     for job_id, summary_raw in bonus_by_job_id.items():
                         candidate_url = candidate_url_by_job_id[job_id]
-                        html_or_exc = bonus_html_by_url.get(candidate_url)
-                        if isinstance(html_or_exc, Exception):
+                        bonus_html_or_exc = bonus_html_by_url.get(candidate_url)
+                        if isinstance(bonus_html_or_exc, Exception) or bonus_html_or_exc is None:
                             self._logger.info(
                                 f"Bonus job {job_id}'s own page didn't load "
                                 f"(expected for expired postings) — keeping summary data."
@@ -239,7 +240,7 @@ class JobIngestionPipeline:
                             continue
                         try:
                             parsed_by_url[candidate_url] = self.parser.parse_job_page(
-                                html_or_exc, source_url=candidate_url
+                                bonus_html_or_exc, source_url=candidate_url
                             )
                         except Exception:  # noqa: BLE001 - same graceful fallback
                             self._logger.info(

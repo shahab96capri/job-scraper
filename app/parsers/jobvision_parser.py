@@ -79,6 +79,32 @@ def _titled(obj: dict | None) -> str | None:
     return obj.get("titleFa") or obj.get("title")
 
 
+def _extract_skill_labels(skills: list) -> list[str]:
+    """Extract display labels from the job detail payload's `skills` list.
+
+    NOTE: every fixture we have (`job_detail_1.html`, `job_detail_2.html`)
+    happens to carry an *empty* `skills` array, so this is a best-effort,
+    defensive reading rather than one confirmed against a real populated
+    example — it accepts either plain strings or `_titled()`-shaped dicts
+    (the same convention every other list field on this payload uses,
+    e.g. `benefits`/`jobCategories`), silently skipping anything that
+    matches neither shape. If skills ever come through empty/wrong in
+    real output, the fix is to send a real job page whose `skills` field
+    is actually populated so this can be corrected against real data.
+    """
+    labels: list[str] = []
+    for item in skills:
+        if isinstance(item, str):
+            label: str | None = item
+        elif isinstance(item, dict):
+            label = _titled(item)
+        else:
+            label = None
+        if label:
+            labels.append(label)
+    return labels
+
+
 class JobVisionParser(BaseParser):
     SITE_CODE = "jobvision"
 
@@ -94,20 +120,27 @@ class JobVisionParser(BaseParser):
         software_reqs = detail.get("softwareRequirements") or []
         language_reqs = detail.get("languageRequirements") or []
         benefits = detail.get("benefits") or []
+        skills = detail.get("skills") or []
 
         company_link = company.get("companyLink")
         raw_company_url = f"https://jobvision.ir{company_link}" if company_link else None
 
         technologies = [
-            _titled(req.get("software"))
+            title
             for req in software_reqs
-            if _titled(req.get("software"))
+            if (title := _titled(req.get("software"))) is not None
         ]
-        languages = [
-            f"{_titled(req.get('language'))}-{_titled(req.get('skill'))}"
-            for req in language_reqs
-            if _titled(req.get("language"))
-        ]
+        languages: list[str] = []
+        for req in language_reqs:
+            language = _titled(req.get("language"))
+            proficiency = _titled(req.get("skill"))
+            if language and proficiency:
+                languages.append(f"{language}-{proficiency}")
+            elif language:
+                # Proficiency level not specified — better to keep just
+                # the language name than to literally embed the text
+                # "None" in a string via the f-string above.
+                languages.append(language)
 
         return RawJobDTO(
             source_code=self.SITE_CODE,
@@ -134,7 +167,7 @@ class JobVisionParser(BaseParser):
             raw_requirements=None,
             raw_benefits=[b.get("titleFa") for b in benefits if b.get("titleFa")] or None,
             raw_technologies=technologies or None,
-            raw_skills=technologies or None,
+            raw_skills=_extract_skill_labels(skills) or None,
             raw_languages=languages or None,
             raw_published_at=(detail.get("activationTime") or {}).get("date"),
             raw_expires_at=(detail.get("expireTime") or {}).get("date"),

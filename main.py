@@ -42,6 +42,8 @@ from app.config.settings import get_settings
 from app.core.browser import dispose_browser, new_context
 from app.core.exceptions import PlatformError
 from app.core.logging import configure_logging, logger
+from app.normalizers.base_normalizer import BaseNormalizer
+from app.parsers.base_parser import BaseParser
 from app.database.session import dispose_engine, get_db_session
 from app.dto.company_export_dto import CompanyExportDTO
 from app.dto.job_export_dto import JobExportDTO
@@ -63,8 +65,8 @@ DEFAULT_MAX_PAGES = 5
 @dataclass(frozen=True)
 class SiteConfig:
     spider_factory: Callable[[Downloader, int, list[str]], BaseSpider]
-    parser_factory: Callable[[], object]
-    normalizer_factory: Callable[[], object]
+    parser_factory: Callable[[], BaseParser]
+    normalizer_factory: Callable[[], BaseNormalizer]
 
 
 SITE_REGISTRY: dict[str, SiteConfig] = {
