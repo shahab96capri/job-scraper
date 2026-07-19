@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from openpyxl.utils import get_column_letter
 
 from app.core.logging import logger
 from app.dto.company_export_dto import CompanyExportDTO
@@ -69,7 +70,7 @@ class ExcelExporter(BaseExporter):
                     max_len = max(
                         [len(str(col))] + [len(str(v)) for v in df[col].astype(str)]
                     )
-                    column_letter = chr(64 + i) if i <= 26 else "A"
+                    column_letter = get_column_letter(i)
                     worksheet.column_dimensions[column_letter].width = min(max_len + 2, 60)
 
         logger.bind(component="exporters.excel").info(
