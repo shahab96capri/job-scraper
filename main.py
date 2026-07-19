@@ -107,6 +107,16 @@ def crawl(
             "listing-page fetches by the number of categories."
         ),
     ),
+    concurrency: int = typer.Option(
+        None,
+        "--concurrency",
+        help=(
+            "How many pages to fetch at once (default from MAX_CONCURRENT_REQUESTS "
+            "in .env, normally 5). Worth raising for large --all-categories runs, "
+            "which can surface thousands of jobs to fetch — but higher values mean "
+            "more simultaneous requests to the target site, so raise gradually."
+        ),
+    ),
 ) -> None:
     """Crawl one site end to end: pages -> jobs -> companies -> database
     -> JSON export -> Excel export."""
@@ -121,10 +131,12 @@ def crawl(
     else:
         keywords = ["برنامه نویس"]
 
-    asyncio.run(_run_crawl(site, pages, keywords))
+    asyncio.run(_run_crawl(site, pages, keywords, concurrency))
 
 
-async def _run_crawl(site: str, pages: int, keywords: list[str]) -> None:
+async def _run_crawl(
+    site: str, pages: int, keywords: list[str], concurrency: int | None
+) -> None:
     configure_logging()
     settings = get_settings()
     config = SITE_REGISTRY[site]
@@ -151,7 +163,13 @@ async def _run_crawl(site: str, pages: int, keywords: list[str]) -> None:
         normalizer = config.normalizer_factory()
 
         async with get_db_session() as session:
-            pipeline = JobIngestionPipeline(session, spider=spider, parser=parser, normalizer=normalizer)
+            pipeline = JobIngestionPipeline(
+                session,
+                spider=spider,
+                parser=parser,
+                normalizer=normalizer,
+                max_concurrent_requests=concurrency,
+            )
             run = await pipeline.run()
 
             source_repo = SourceRepository(session)

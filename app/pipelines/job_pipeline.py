@@ -216,23 +216,52 @@ class JobIngestionPipeline:
                         self._logger.warning(f"Could not read bonus job list from {company_url}: {exc}")
 
                 if bonus_by_job_id:
+                    # Skip the individual-page fetch entirely for bonus
+                    # jobs the company summary already flags as expired —
+                    # we already know that page is unlikely to render
+                    # (that's the whole reason this fallback path exists),
+                    # so attempting it anyway is pure wasted time at scale.
+                    # A single --all-categories run surfaced 13,051 bonus
+                    # jobs in real use — most of them expired — and trying
+                    # to fetch+retry every single one is what turned an
+                    # otherwise-fast run into a multi-hour one. Only bonus
+                    # jobs still marked active get the real attempt, where
+                    # success is actually likely and worth the request.
+                    active_bonus = {
+                        job_id: raw
+                        for job_id, raw in bonus_by_job_id.items()
+                        if raw.raw_status != "منقضی"
+                    }
+                    expired_bonus = {
+                        job_id: raw
+                        for job_id, raw in bonus_by_job_id.items()
+                        if raw.raw_status == "منقضی"
+                    }
                     self._logger.info(
                         f"Found {len(bonus_by_job_id)} additional job(s) via company pages "
-                        f"(includes expired postings not visible in normal search)"
+                        f"({len(active_bonus)} active -> will try their own page, "
+                        f"{len(expired_bonus)} expired -> using company-page summary directly, "
+                        f"no extra request)"
                     )
+                    for job_id, summary_raw in expired_bonus.items():
+                        parsed_by_url[job_url_from_id(job_id)] = summary_raw.model_copy(
+                            update={"source_url": job_url_from_id(job_id)}
+                        )
+
                     candidate_url_by_job_id = {
-                        job_id: job_url_from_id(job_id) for job_id in bonus_by_job_id
+                        job_id: job_url_from_id(job_id) for job_id in active_bonus
                     }
                     bonus_html_by_url = await self._fetch_many(
                         list(candidate_url_by_job_id.values()), self.spider.fetch_job_html
                     )
-                    for job_id, summary_raw in bonus_by_job_id.items():
+                    for job_id, summary_raw in active_bonus.items():
                         candidate_url = candidate_url_by_job_id[job_id]
                         bonus_html_or_exc = bonus_html_by_url.get(candidate_url)
                         if isinstance(bonus_html_or_exc, Exception) or bonus_html_or_exc is None:
                             self._logger.info(
                                 f"Bonus job {job_id}'s own page didn't load "
-                                f"(expected for expired postings) — keeping summary data."
+                                f"despite being marked active in the company summary "
+                                f"(may have expired since) — keeping summary data."
                             )
                             parsed_by_url[candidate_url] = summary_raw.model_copy(
                                 update={"source_url": candidate_url}
@@ -245,12 +274,14 @@ class JobIngestionPipeline:
                         except Exception:  # noqa: BLE001 - same graceful fallback
                             self._logger.info(
                                 f"Bonus job {job_id}'s own page didn't parse "
-                                f"(expected for expired postings) — keeping summary data."
+                                f"despite being marked active in the company summary "
+                                f"(may have expired since) — keeping summary data."
                             )
                             parsed_by_url[candidate_url] = summary_raw.model_copy(
                                 update={"source_url": candidate_url}
                             )
-                    job_urls = job_urls + list(candidate_url_by_job_id.values())
+                    expired_bonus_urls = [job_url_from_id(job_id) for job_id in expired_bonus]
+                    job_urls = job_urls + list(candidate_url_by_job_id.values()) + expired_bonus_urls
                     jobs_found = len(job_urls)
 
             # --- Phase 4: normalize/validate/persist SEQUENTIALLY --------
