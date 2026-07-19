@@ -46,6 +46,24 @@ NOT_FOUND_STATUS = 404
 SERVER_ERROR_THRESHOLD = 500
 
 
+def _wait_seconds(retry_state, base_backoff_seconds: float) -> float:
+    """Exponential backoff, with a much more cautious multiplier/ceiling
+    specifically for `RateLimitedError` (HTTP 429). A 429 means the site
+    is explicitly telling us to slow down — hammering it again after the
+    same short backoff a plain network blip gets is exactly how a
+    crawler gets an IP blocked outright.
+
+    A standalone function (not a closure inside `fetch_html`) specifically
+    so it's directly unit-testable without needing to actually run
+    through real retry timing.
+    """
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    is_rate_limited = isinstance(exc, RateLimitedError)
+    multiplier = base_backoff_seconds * (4 if is_rate_limited else 1)
+    wait = multiplier * (2 ** (retry_state.attempt_number - 1))
+    return min(wait, 120 if is_rate_limited else 60)
+
+
 class Downloader:
     """Fetches rendered HTML for a URL through a shared browser context,
     with retry/backoff on transient failures."""
@@ -79,22 +97,10 @@ class Downloader:
         the `RateLimitedError` subclass) after exhausting
         `max_retries` retries with exponential backoff.
         """
-        def _wait_seconds(retry_state) -> float:
-            exc = retry_state.outcome.exception() if retry_state.outcome else None
-            # A 429 means the site is explicitly telling us to slow down —
-            # hammering it again after the same short backoff a plain
-            # network blip gets is exactly how a crawler gets an IP
-            # blocked outright. Wait noticeably longer (4x base, higher
-            # ceiling) specifically for that case.
-            is_rate_limited = isinstance(exc, RateLimitedError)
-            multiplier = self._backoff_seconds * (4 if is_rate_limited else 1)
-            wait = multiplier * (2 ** (retry_state.attempt_number - 1))
-            return min(wait, 120 if is_rate_limited else 60)
-
         retrying = AsyncRetrying(
             retry=retry_if_exception_type(TransientCrawlError),
             stop=stop_after_attempt(self._max_retries + 1),
-            wait=_wait_seconds,
+            wait=lambda retry_state: _wait_seconds(retry_state, self._backoff_seconds),
             reraise=True,
         )
         try:

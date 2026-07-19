@@ -81,7 +81,7 @@ def configure_logging() -> None:
 
     _configured = True
     logger.bind(component="core.logging").info(
-        f"Logging configured | env={settings.app_env} | level={settings.log_level}"
+        f"{settings.app_name} | env={settings.app_env} | level={settings.log_level}"
     )
 
 

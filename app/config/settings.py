@@ -61,7 +61,17 @@ class Settings(BaseSettings):
     request_delay_seconds: float = Field(default=2.0, ge=0.0)
     max_retries: int = Field(default=3, ge=0)
     retry_backoff_seconds: float = Field(default=5.0, ge=0.0)
-    max_concurrent_spiders: int = Field(default=2, ge=1)
+    max_concurrent_spiders: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Reserved for when multiple SITES (jobvision + jobinja + ...) "
+            "run concurrently in one process — not yet wired up anywhere, "
+            "since only one site is implemented so far. Not to be confused "
+            "with max_concurrent_requests, which IS active today (concurrent "
+            "page fetches within a single site's crawl)."
+        ),
+    )
     max_concurrent_requests: int = Field(
         default=5,
         ge=1,

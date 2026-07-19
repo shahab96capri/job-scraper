@@ -21,7 +21,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.core.exceptions import PermanentCrawlError, RateLimitedError, TransientCrawlError
-from app.spiders.downloader import Downloader
+from app.spiders.downloader import Downloader, _wait_seconds
 
 pytestmark = pytest.mark.asyncio
 
@@ -165,3 +165,45 @@ async def test_page_is_always_closed_even_on_failure():
 
     # Rate-limited/500 case: the single created page must still be closed.
     assert context.pages_created == 1
+
+
+class _FakeOutcome:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def exception(self):
+        return self._exc
+
+
+class _FakeRetryState:
+    def __init__(self, exc: Exception, attempt_number: int) -> None:
+        self.outcome = _FakeOutcome(exc)
+        self.attempt_number = attempt_number
+
+
+async def test_rate_limited_backoff_is_meaningfully_longer_than_plain_transient():
+    # Regression test for a real gap found in code review: the docstring
+    # always claimed rate-limited responses get a longer backoff than a
+    # plain network blip, but until this was fixed the code applied
+    # identical exponential backoff to both. This calls _wait_seconds
+    # directly (no real sleeping, no flaky timing) to lock in the fix.
+    base_backoff = 2.0
+
+    plain_wait = _wait_seconds(_FakeRetryState(TransientCrawlError("blip"), 1), base_backoff)
+    rate_limited_wait = _wait_seconds(
+        _FakeRetryState(RateLimitedError("429"), 1), base_backoff
+    )
+
+    assert rate_limited_wait > plain_wait
+    assert rate_limited_wait >= plain_wait * 3  # meaningfully longer, not a rounding blip
+
+    # The higher ceiling (120s) must also actually apply at high attempt
+    # numbers, not just the initial multiplier.
+    rate_limited_wait_late = _wait_seconds(
+        _FakeRetryState(RateLimitedError("429"), 10), base_backoff
+    )
+    plain_wait_late = _wait_seconds(
+        _FakeRetryState(TransientCrawlError("blip"), 10), base_backoff
+    )
+    assert rate_limited_wait_late == 120
+    assert plain_wait_late == 60
